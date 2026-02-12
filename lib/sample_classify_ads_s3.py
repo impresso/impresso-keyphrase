@@ -5,7 +5,8 @@ Sample and classify articles as ad/non-ad from an S3 .jsonl.gz input.
 Workflow:
 1. Load existing classified records from *_classified.jsonl.gz (if present)
    and collect already processed IDs.
-2. Randomly sample a one-shot pool per language (default: 2000 records/lang).
+2. Randomly sample a one-shot pool per language
+   (default: 2 * target non-ad count).
 3. Retrieve missing full text (`ft`) for the whole sampled pool using s3 compiler.
 4. Classify sampled pool as ad/non-ad and store all classified records.
 5. Export test set as up to target non-ad records per language (default: 1000).
@@ -50,27 +51,6 @@ from impresso_cookbook import (  # type: ignore
 
 log = logging.getLogger(__name__)
 
-AD_TRUE_VALUES = {
-    "ad",
-    "ads",
-    "advertisement",
-    "1",
-    "true",
-    "t",
-    "yes",
-    "y",
-}
-AD_FALSE_VALUES = {
-    "non-ad",
-    "nonad",
-    "non_ad",
-    "0",
-    "false",
-    "f",
-    "no",
-    "n",
-}
-
 DEFAULT_AD_FIELD = "ad_class"
 DEFAULT_AD_VALUE = "ad"
 DEFAULT_NON_AD_VALUE = "non-ad"
@@ -84,6 +64,14 @@ class ClassifierConfig:
     diagnostics: bool
     precision: Optional[int]
     batch_size: int
+
+
+@dataclass
+class ClassificationDecision:
+    """Parsed classification result for one record."""
+
+    label: str
+    is_ad: bool
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
@@ -153,17 +141,6 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help=f"Output class field name (default: {DEFAULT_AD_FIELD}).",
     )
     parser.add_argument(
-        "--ad-value",
-        default=DEFAULT_AD_VALUE,
-        help=f"Label value for ads (default: {DEFAULT_AD_VALUE}).",
-    )
-    parser.add_argument(
-        "--non-ad-value",
-        dest="non_ad_value",
-        default=DEFAULT_NON_AD_VALUE,
-        help=f"Label value for non-ads (default: {DEFAULT_NON_AD_VALUE}).",
-    )
-    parser.add_argument(
         "--languages",
         nargs="*",
         default=None,
@@ -186,12 +163,6 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         type=int,
         default=1000,
         help="Target number of non-ads per language (default: 1000).",
-    )
-    parser.add_argument(
-        "--max-rounds",
-        type=int,
-        default=None,
-        help="Compatibility flag (ignored in one-shot sampling mode).",
     )
     parser.add_argument(
         "--random-seed",
@@ -305,33 +276,6 @@ def to_int(value: Any) -> Optional[int]:
         return None
 
 
-def parse_is_ad(value: Any) -> Optional[bool]:
-    """Parse ad flag from heterogeneous classifier outputs."""
-    if isinstance(value, bool):
-        return value
-
-    if isinstance(value, (int, float)):
-        if value == 0:
-            return False
-        if value == 1:
-            return True
-
-    text = as_str(value).lower()
-    if not text:
-        return None
-    if text in AD_TRUE_VALUES:
-        return True
-    if text in AD_FALSE_VALUES:
-        return False
-
-    if text.startswith("ad") or "advert" in text:
-        return True
-    if text.startswith("non"):
-        return False
-
-    return None
-
-
 def record_matches_type(record: Dict[str, Any], type_field: str, type_value: str) -> bool:
     """Filter records by a type field/value pair."""
     if not type_field:
@@ -387,8 +331,6 @@ def preload_existing_classified(
     id_field: str,
     language_field: str,
     class_field: str,
-    ad_value: str,
-    non_ad_value: str,
 ) -> Tuple[Set[str], Dict[str, int], int]:
     """
     Load existing classified file and copy it to tmp writer.
@@ -402,6 +344,7 @@ def preload_existing_classified(
 
     if not s3_uri_exists(output_s3):
         return processed_ids, non_ad_counts, existing_records
+    non_ad_label = DEFAULT_NON_AD_VALUE
 
     with smart_open(
         output_s3,
@@ -426,14 +369,7 @@ def preload_existing_classified(
             existing_records += 1
 
             class_value = as_str(record.get(class_field)).lower()
-            parsed_flag = parse_is_ad(class_value)
-            if parsed_flag is None:
-                if class_value == as_str(non_ad_value).lower():
-                    parsed_flag = False
-                elif class_value == as_str(ad_value).lower():
-                    parsed_flag = True
-
-            if parsed_flag is False:
+            if class_value == non_ad_label:
                 lang = as_str(record.get(language_field))
                 if lang:
                     non_ad_counts[lang] += 1
@@ -471,7 +407,7 @@ def sample_batch_per_language(
     """
     Reservoir-sample up to N unprocessed records per requested language.
 
-    This performs a full pass over input for one sampling round.
+    This performs a full one-shot pass over input.
     """
     rng = random.Random(random_seed)
     needed = set(needed_languages)
@@ -510,50 +446,17 @@ def sample_batch_per_language(
     return reservoirs
 
 
-def _extract_is_ad_from_output(output: Any) -> Optional[bool]:
-    """Try hard to interpret model output as ad/non-ad flag."""
+def _extract_type_label_from_output(output: Any) -> Optional[str]:
+    """Extract raw classifier type label when available."""
     if isinstance(output, list):
         if not output:
             return None
-        return _extract_is_ad_from_output(output[0])
+        return _extract_type_label_from_output(output[0])
 
-    if not isinstance(output, dict):
-        return parse_is_ad(output)
-
-    for key in (
-        "is_ad",
-        "ad",
-        "ad_flag",
-        "prediction_is_ad",
-        "advertisement",
-        "type",
-        "label",
-        "prediction",
-        "predicted_label",
-        "class",
-    ):
-        if key in output:
-            parsed = parse_is_ad(output.get(key))
-            if parsed is not None:
-                return parsed
-
-    promotion_final = output.get("promotion_prob_final")
-    threshold_used = output.get("threshold_used")
-    if promotion_final is not None:
-        try:
-            score = float(promotion_final)
-            threshold = float(threshold_used) if threshold_used is not None else 0.5
-            return score >= threshold
-        except (TypeError, ValueError):
-            pass
-
-    for key in ("promotion_prob", "score", "probability"):
-        if key in output:
-            try:
-                return float(output[key]) >= 0.5
-            except (TypeError, ValueError):
-                continue
-
+    if isinstance(output, dict) and "type" in output:
+        label = as_str(output.get("type"))
+        if label:
+            return label
     return None
 
 
@@ -754,9 +657,9 @@ def classify_records(
     text_field: str,
     config: ClassifierConfig,
     pipeline: Any,
-) -> Dict[str, bool]:
+) -> Dict[str, ClassificationDecision]:
     """Classify records with impresso internal AdClassifierPipeline."""
-    decisions: Dict[str, bool] = {}
+    decisions: Dict[str, ClassificationDecision] = {}
 
     for start in range(0, len(records), config.batch_size):
         chunk = records[start : start + config.batch_size]
@@ -772,14 +675,23 @@ def classify_records(
                 f"Classifier returned {len(outputs)} results for {len(chunk)} inputs"
             )
 
-        for (record_id, record), output in zip(chunk, outputs):
-            parsed = _extract_is_ad_from_output(output)
-            if parsed is None:
+        for (record_id, _record), output in zip(chunk, outputs):
+            type_label = _extract_type_label_from_output(output)
+            if not type_label:
                 raise RuntimeError(
-                    "Could not parse classifier output for "
+                    "Classifier output is missing required 'type' field for "
                     f"record id={record_id}"
                 )
-            decisions[record_id] = parsed
+            final_label = type_label.lower()
+            if final_label not in {DEFAULT_AD_VALUE, DEFAULT_NON_AD_VALUE}:
+                raise RuntimeError(
+                    "Unexpected classifier 'type' value "
+                    f"'{type_label}' for record id={record_id}"
+                )
+            decisions[record_id] = ClassificationDecision(
+                label=final_label,
+                is_ad=(final_label == DEFAULT_AD_VALUE),
+            )
 
     return decisions
 
@@ -794,14 +706,12 @@ def record_length(record: Dict[str, Any], length_field: str, text_field: str) ->
 
 def append_classified_records(
     records: Sequence[Tuple[str, Dict[str, Any]]],
-    decisions: Dict[str, bool],
+    decisions: Dict[str, ClassificationDecision],
     tmp_writer: Any,
     processed_ids: Set[str],
     non_ad_counts: Dict[str, int],
     language_field: str,
     class_field: str,
-    ad_value: str,
-    non_ad_value: str,
     length_field: str,
     text_field: str,
 ) -> Tuple[int, int, int]:
@@ -821,9 +731,10 @@ def append_classified_records(
         if record_id not in decisions:
             continue
 
-        is_ad = decisions[record_id]
+        decision = decisions[record_id]
+        is_ad = decision.is_ad
         classified_record = dict(record)
-        classified_record[class_field] = ad_value if is_ad else non_ad_value
+        classified_record[class_field] = decision.label
 
         tmp_writer.write(json.dumps(classified_record, ensure_ascii=False) + "\n")
         processed_ids.add(record_id)
@@ -848,91 +759,72 @@ def run_sampling_phase(
     non_ad_counts: Dict[str, int],
     classifier: Any,
 ) -> Tuple[int, int]:
-    """Run iterative per-language random sampling until non-ad targets are met."""
-    rounds_completed = 0
-    total_appended = 0
+    """
+    Run one-shot per-language sampling, enrichment, and classification.
 
-    while True:
-        needed_languages = [
-            language
-            for language in target_languages
-            if non_ad_counts.get(language, 0) < args.target_non_ad_per_language
-        ]
+    Returns:
+        sampled_records_count, newly_appended_count
+    """
+    batches = sample_batch_per_language(
+        input_s3=input_s3,
+        id_field=args.id_field,
+        class_field=args.class_field,
+        language_field=args.language_field,
+        type_field=args.type_field,
+        type_value=args.type_value,
+        needed_languages=target_languages,
+        processed_ids=processed_ids,
+        batch_size_per_language=args.batch_size_per_language,
+        random_seed=args.random_seed,
+    )
 
-        if not needed_languages:
-            break
+    sampled_records: List[Tuple[str, Dict[str, Any]]] = []
+    for language in target_languages:
+        sampled_records.extend(batches.get(language, []))
 
-        if args.max_rounds is not None and rounds_completed >= args.max_rounds:
-            log.info("Reached max rounds (%d), stopping sampling phase", args.max_rounds)
-            break
-
-        batches = sample_batch_per_language(
-            input_s3=input_s3,
-            id_field=args.id_field,
-            class_field=args.class_field,
-            language_field=args.language_field,
-            type_field=args.type_field,
-            type_value=args.type_value,
-            needed_languages=needed_languages,
-            processed_ids=processed_ids,
-            batch_size_per_language=args.batch_size_per_language,
-            random_seed=args.random_seed + rounds_completed,
-        )
-
-        sampled_records: List[Tuple[str, Dict[str, Any]]] = []
-        for language in needed_languages:
-            sampled_records.extend(batches.get(language, []))
-
-        if not sampled_records:
-            log.info(
-                "No more unprocessed candidates for needed languages: %s",
-                ", ".join(sorted(needed_languages)),
-            )
-            break
-
-        sampled_records = enrich_records_with_text(sampled_records, args)
-        decisions = classify_records(
-            records=sampled_records,
-            text_field=args.text_field,
-            config=ClassifierConfig(
-                diagnostics=args.pipeline_diagnostics,
-                precision=args.pipeline_precision,
-                batch_size=args.classifier_batch_size,
-            ),
-            pipeline=classifier,
-        )
-
-        appended, non_ads_added, _ = append_classified_records(
-            records=sampled_records,
-            decisions=decisions,
-            tmp_writer=tmp_writer,
-            processed_ids=processed_ids,
-            non_ad_counts=non_ad_counts,
-            language_field=args.language_field,
-            class_field=args.class_field,
-            ad_value=args.ad_value,
-            non_ad_value=args.non_ad_value,
-            length_field=args.length_field,
-            text_field=args.text_field,
-        )
-
-        total_appended += appended
-        rounds_completed += 1
-
-        progress = ", ".join(
-            f"{lang}:{non_ad_counts.get(lang, 0)}/{args.target_non_ad_per_language}"
-            for lang in target_languages
-        )
+    if not sampled_records:
         log.info(
-            "Round %d -> sampled=%d appended=%d non_ads_added=%d progress=[%s]",
-            rounds_completed,
-            len(sampled_records),
-            appended,
-            non_ads_added,
-            progress,
+            "No unprocessed candidates available for target languages: %s",
+            ", ".join(sorted(target_languages)),
         )
+        return 0, 0
 
-    return total_appended, rounds_completed
+    sampled_records = enrich_records_with_text(sampled_records, args)
+    decisions = classify_records(
+        records=sampled_records,
+        text_field=args.text_field,
+        config=ClassifierConfig(
+            diagnostics=args.pipeline_diagnostics,
+            precision=args.pipeline_precision,
+            batch_size=args.classifier_batch_size,
+        ),
+        pipeline=classifier,
+    )
+
+    appended, non_ads_added, _ = append_classified_records(
+        records=sampled_records,
+        decisions=decisions,
+        tmp_writer=tmp_writer,
+        processed_ids=processed_ids,
+        non_ad_counts=non_ad_counts,
+        language_field=args.language_field,
+        class_field=args.class_field,
+        length_field=args.length_field,
+        text_field=args.text_field,
+    )
+
+    progress = ", ".join(
+        f"{lang}:{non_ad_counts.get(lang, 0)}"
+        for lang in target_languages
+    )
+    log.info(
+        "One-shot sample done: sampled=%d appended=%d non_ads_added=%d non_ad_counts=[%s]",
+        len(sampled_records),
+        appended,
+        non_ads_added,
+        progress,
+    )
+    return len(sampled_records), appended
 
 
 def iter_unprocessed_records(
@@ -994,8 +886,6 @@ def run_remaining_estimation(
             non_ad_counts=non_ad_counts,
             language_field=args.language_field,
             class_field=args.class_field,
-            ad_value=args.ad_value,
-            non_ad_value=args.non_ad_value,
             length_field=args.length_field,
             text_field=args.text_field,
         )
@@ -1046,13 +936,13 @@ def copy_non_ad_lines(
     source_path: str,
     destination_path: str,
     class_field: str,
-    ad_value: str,
-    non_ad_value: str,
-) -> int:
-    """Copy only non-ad records to destination and return copied count."""
+    language_field: str,
+    target_non_ad_per_language: int,
+) -> Tuple[int, Dict[str, int]]:
+    """Copy capped non-ad records per language and return totals."""
     copied = 0
-    non_ad_label = as_str(non_ad_value).lower()
-    ad_label = as_str(ad_value).lower()
+    per_language_counts: Dict[str, int] = defaultdict(int)
+    non_ad_label = DEFAULT_NON_AD_VALUE
 
     with smart_open(
         source_path,
@@ -1077,18 +967,15 @@ def copy_non_ad_lines(
                 continue
 
             class_value = as_str(record.get(class_field)).lower()
-            parsed_flag = parse_is_ad(class_value)
-            if parsed_flag is None:
-                if class_value == non_ad_label:
-                    parsed_flag = False
-                elif class_value == ad_label:
-                    parsed_flag = True
-
-            if parsed_flag is False:
+            if class_value == non_ad_label:
+                language = as_str(record.get(language_field)) or "unknown"
+                if per_language_counts[language] >= target_non_ad_per_language:
+                    continue
                 dst.write(json.dumps(record, ensure_ascii=False) + "\n")
                 copied += 1
+                per_language_counts[language] += 1
 
-    return copied
+    return copied, per_language_counts
 
 
 def _ensure_parent_dir(path: str) -> None:
@@ -1128,8 +1015,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 id_field=args.id_field,
                 language_field=args.language_field,
                 class_field=args.class_field,
-                ad_value=args.ad_value,
-                non_ad_value=args.non_ad_value,
             )
 
             log.info(
@@ -1155,9 +1040,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 log.info("Target languages: %s", ", ".join(target_languages))
 
             sampled_appended = 0
-            rounds_completed = 0
+            sampled_count = 0
             if target_languages:
-                sampled_appended, rounds_completed = run_sampling_phase(
+                sampled_count, sampled_appended = run_sampling_phase(
                     input_s3=input_s3,
                     target_languages=target_languages,
                     args=args,
@@ -1172,8 +1057,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     for language in target_languages
                 )
                 log.info(
-                    "Sampling phase done: rounds=%d newly_appended=%d non_ad_counts=[%s]",
-                    rounds_completed,
+                    "Sampling phase done: sampled=%d newly_appended=%d non_ad_counts=[%s]",
+                    sampled_count,
                     sampled_appended,
                     progress,
                 )
@@ -1207,17 +1092,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         if args.download_local:
             _ensure_parent_dir(args.download_local)
-            non_ad_local_count = copy_non_ad_lines(
+            non_ad_local_count, per_language_export = copy_non_ad_lines(
                 source_path=tmp_path,
                 destination_path=args.download_local,
                 class_field=args.class_field,
-                ad_value=args.ad_value,
-                non_ad_value=args.non_ad_value,
+                language_field=args.language_field,
+                target_non_ad_per_language=args.target_non_ad_per_language,
+            )
+            per_lang_text = ", ".join(
+                f"{language}:{count}"
+                for language, count in sorted(per_language_export.items())
             )
             log.info(
-                "Wrote local non-ad file: %s (records=%d)",
+                "Wrote local non-ad file: %s (records=%d per_language=[%s])",
                 args.download_local,
                 non_ad_local_count,
+                per_lang_text,
             )
 
         log.info(
