@@ -5,12 +5,13 @@ Sample and classify articles as ad/non-ad from an S3 .jsonl.gz input.
 Workflow:
 1. Load existing classified records from *_classified.jsonl.gz (if present)
    and collect already processed IDs.
-2. Repeatedly sample random batches per language and classify them.
-3. Keep classifying until reaching target non-ad count per language, or no
-   unprocessed candidates remain.
-4. Optionally classify all remaining unprocessed records to estimate retained
+2. Randomly sample a one-shot pool per language (default: 2000 records/lang).
+3. Retrieve missing full text (`ft`) for the whole sampled pool using s3 compiler.
+4. Classify sampled pool as ad/non-ad and store all classified records.
+5. Export test set as up to target non-ad records per language (default: 1000).
+6. Optionally classify all remaining unprocessed records to estimate retained
    article count and retained character volume after ad filtering.
-5. Save results back to the same S3 folder with `_classified` suffix.
+7. Save results back to the same S3 folder with `_classified` suffix.
 
 All classified records (ads + non-ads) are stored with original fields plus
 an additional field (default: `ad_class`) holding `ad` or `non-ad`.
@@ -19,7 +20,6 @@ an additional field (default: `ad_class`) holding `ad` or `non-ad`.
 python lib/sample_classify_ads_s3.py \
   --input-s3 s3://115-canonical-processed-final/langident/langident-lid-ensemble_multilingual_v2-0-2__AGGREGATED_filtered.jsonl.gz \
   --compiler-s3-prefix s3://142-processed-data-final/lingproc/lingproc-pos-spacy_v3.6.0-multilingual_v1-0-3/ \
-  --batch-size-per-language 100 \
   --target-non-ad-per-language 1000 \
   --download-local ./data/all/sample_classified.jsonl.gz
 
@@ -175,8 +175,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--batch-size-per-language",
         type=int,
-        default=100,
-        help="Sampling batch size per language for each round (default: 100).",
+        default=None,
+        help=(
+            "One-shot sampled pool size per language before classification "
+            "(default: 2 * --target-non-ad-per-language)."
+        ),
     )
     parser.add_argument(
         "--target-non-ad-per-language",
@@ -188,7 +191,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--max-rounds",
         type=int,
         default=None,
-        help="Optional hard cap for sampling rounds.",
+        help="Compatibility flag (ignored in one-shot sampling mode).",
     )
     parser.add_argument(
         "--random-seed",
@@ -230,7 +233,10 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--download-local",
         default=None,
-        help="Optional local .jsonl.gz destination containing only non-ad records.",
+        help=(
+            "Optional local .jsonl.gz destination with up to "
+            "--target-non-ad-per-language non-ads per language."
+        ),
     )
     parser.add_argument(
         "--log-file",
@@ -251,16 +257,19 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         parser.error("--input-s3 must start with s3://")
     if args.output_s3 and not args.output_s3.startswith("s3://"):
         parser.error("--output-s3 must start with s3://")
-    if args.batch_size_per_language <= 0:
-        parser.error("--batch-size-per-language must be > 0")
     if args.target_non_ad_per_language <= 0:
         parser.error("--target-non-ad-per-language must be > 0")
+    if args.batch_size_per_language is not None and args.batch_size_per_language <= 0:
+        parser.error("--batch-size-per-language must be > 0")
     if args.classifier_batch_size <= 0:
         parser.error("--classifier-batch-size must be > 0")
     if args.remaining_batch_size <= 0:
         parser.error("--remaining-batch-size must be > 0")
     if args.compiler_s3_prefix and not args.compiler_s3_prefix.startswith("s3://"):
         parser.error("--compiler-s3-prefix must start with s3://")
+
+    if args.batch_size_per_language is None:
+        args.batch_size_per_language = args.target_non_ad_per_language * 2
 
     return args
 
