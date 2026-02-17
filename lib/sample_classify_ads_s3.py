@@ -20,9 +20,9 @@ an additional field (default: `ad_class`) holding `ad` or `non-ad`.
 
 python lib/sample_classify_ads_s3.py \
   --input-s3 s3://115-canonical-processed-final/langident/langident-lid-ensemble_multilingual_v2-0-2__AGGREGATED_filtered.jsonl.gz \
-  --compiler-s3-prefix s3://142-processed-data-final/lingproc/lingproc-pos-spacy_v3.6.0-multilingual_v1-0-3/ \
+  --compiler-s3-prefix s3://22-rebuilt-final/ \
   --target-non-ad-per-language 1000 \
-  --download-local ./data/all/sample_classified.jsonl.gz
+  --download-local ./data/all/sample_non_ads.jsonl.gz
 
 """
 
