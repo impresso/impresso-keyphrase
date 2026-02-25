@@ -642,11 +642,14 @@ def enrich_records_with_text(
 
         if not as_str(updated.get(args.text_field)):
             unresolved += 1
+            continue
         enriched.append((record_id, updated))
 
     if unresolved:
-        raise RuntimeError(
-            f"Could not retrieve '{args.text_field}' for {unresolved} records via s3 compiler."
+        log.warning(
+            "Skipping %d records still missing '%s' after s3 compiler enrichment",
+            unresolved,
+            args.text_field,
         )
 
     return enriched
