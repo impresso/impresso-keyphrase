@@ -20,7 +20,7 @@ an additional field (default: `ad_class`) holding `ad` or `non-ad`.
 
 python lib/sample_classify_ads_s3.py \
   --input-s3 s3://115-canonical-processed-final/langident/langident-lid-ensemble_multilingual_v2-0-2__AGGREGATED_filtered.jsonl.gz \
-  --compiler-s3-prefix s3://22-rebuilt-final/ \
+  --compiler-s3-prefix s3://122-rebuilt-final/ \
   --target-non-ad-per-language 1000 \
   --download-local ./data/all/sample_non_ads.jsonl.gz
 
@@ -521,7 +521,8 @@ def _build_compiler_transform_expr(
         "{"
         + f"\"id\": {_jq_accessor(match_field)}, "
         + f"{json.dumps(text_field)}: {_jq_accessor(text_field)}, "
-        + f"{json.dumps(length_field)}: {_jq_accessor(length_field)}"
+        + f"{json.dumps(length_field)}: {_jq_accessor(length_field)}, "
+        + "\"title\": .[\"title\"]"
         + "}"
     )
 
@@ -639,6 +640,10 @@ def enrich_records_with_text(
                     compiled_len = to_int(compiled.get(args.length_field))
                     if compiled_len is not None:
                         updated[args.length_field] = compiled_len
+                if not as_str(updated.get("title")):
+                    compiled_title = as_str(compiled.get("title"))
+                    if compiled_title:
+                        updated["title"] = compiled_title
 
         if not as_str(updated.get(args.text_field)):
             unresolved += 1
