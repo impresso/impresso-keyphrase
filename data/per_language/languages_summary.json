@@ -1,0 +1,41 @@
+{
+  "input_path": "./data/all/sample_non_ads.jsonl",
+  "output_prefix": "./data/per_language",
+  "language_field": "lg",
+  "length_field": "len",
+  "total_records": 4000,
+  "total_len": 14964643,
+  "invalid_json_lines": 0,
+  "languages": [
+    "de",
+    "en",
+    "fr",
+    "lb"
+  ],
+  "languages_summary": [
+    {
+      "language": "de",
+      "records": 1000,
+      "total_len": 4057875,
+      "output_path": "./data/per_language/de.jsonl"
+    },
+    {
+      "language": "en",
+      "records": 1000,
+      "total_len": 5947546,
+      "output_path": "./data/per_language/en.jsonl"
+    },
+    {
+      "language": "fr",
+      "records": 1000,
+      "total_len": 3141101,
+      "output_path": "./data/per_language/fr.jsonl"
+    },
+    {
+      "language": "lb",
+      "records": 1000,
+      "total_len": 1818121,
+      "output_path": "./data/per_language/lb.jsonl"
+    }
+  ]
+}
