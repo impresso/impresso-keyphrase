@@ -1,4 +1,5 @@
 build/
+build.d/
 .venv/
 test1/
 test?/

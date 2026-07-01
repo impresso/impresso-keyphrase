@@ -1,313 +1,208 @@
-# Impresso Make-Based Processing Template
+# Impresso Keyphrase
 
-This repository provides a template for creating new processing pipelines within the Impresso project ecosystem. It demonstrates best practices for building scalable, distributed newspaper processing workflows using Make, Python, and S3 storage.
+This repository contains the Impresso keyphrase-generation workflow. It is used
+to build curated, language-specific article samples from Impresso processed data,
+remove advertisements, generate English conceptual keyphrases for each retained
+article with a DeepSeek-compatible chat model, and publish the run outputs to S3.
 
-## Table of Contents
+The pipeline starts from the aggregated language-identification JSONL.GZ output
+and produces versioned keyphrase datasets under an Impresso processing run prefix.
+It is intended for reproducible batch runs over large S3-hosted corpora, with
+local Make stamp files used only for dependency tracking.
 
-- [Overview](#overview)
-- [Template Structure](#template-structure)
-- [Quick Start](#quick-start)
-- [Configuration](#configuration)
-- [Running the Template](#running-the-template)
-- [Adapting to Your Processing Pipeline](#adapting-to-your-processing-pipeline)
-- [Build System](#build-system)
-- [Contributing](#contributing)
-- [About Impresso](#about-impresso)
+## What the Pipeline Does
 
-## Overview
+The Make entrypoint mirrors the script order in `lib/`:
 
-This template provides a complete framework for building newspaper processing pipelines that:
+1. `lib/filter_jsonl_gz_s3.py`
+   Filters the aggregated input to article records that satisfy OCR-quality and
+   text-length thresholds.
+2. `lib/sample_classify_ads_s3.py`
+   Samples candidates per language, retrieves missing full text from the compiler
+   source when needed, classifies records as `ad` or `non-ad`, and exports a
+   balanced non-ad sample.
+3. `lib/split_by_language_jsonl_s3.py`
+   Splits the non-ad sample into one JSONL file per language and writes
+   `languages_summary.json`.
+4. `lib/generate_keywords_deepseek_s3.py`
+   Calls a DeepSeek-compatible OpenAI client for each per-language record, writes
+   `keywords_<language>.jsonl`, and records token usage in
+   `deepseek_summary.json`.
 
-- **Scale Horizontally**: Process data across multiple machines without conflicts
-- **Handle Large Datasets**: Efficiently process large collections using S3 and local stamp files
-- **Maintain Consistency**: Ensure reproducible results with proper dependency management
-- **Support Parallel Processing**: Utilize multi-core systems and distributed computing
-- **Integrate with S3**: Seamlessly work with both local files and S3 storage
+JSON schema validation is enabled by default after each stage. The schemas live
+in `schemas/keyphrase/`.
 
-## Template Structure
+## Repository Layout
 
+```text
+README.md                         Main repository documentation
+Makefile                          Make entrypoint including the keyphrase addon
+cookbook-repo-addons/keyphrase.mk Keyphrase-specific Make targets and variables
+lib/                              Pipeline scripts and schema validator
+schemas/keyphrase/                JSON schemas for pipeline outputs
+data/                             Small local sample and lookup files
+test-data/                        Small test fixture inputs
+cookbook/                         Vendored Impresso Make cookbook helpers
+build.d/                          Local Make stamps and transient files
 ```
-├── README.md                   # This file
-├── Makefile                    # Main build configuration
-├── .env                        # Environment variables (create manually from dotenv.sample)
-├── dotenv.sample               # Sample environment configuration
-├── Pipfile                     # Python dependencies
-├── lib/
-│   └── cli_TEMPLATE.py         # Template CLI script
-├── cookbook/                   # Build system components
-│   ├── README.md               # Detailed cookbook documentation
-│   ├── setup_TEMPLATE.mk       # Template-specific setup
-│   ├── paths_TEMPLATE.mk       # Path definitions
-│   ├── sync_TEMPLATE.mk        # Data synchronization
-│   ├── processing_TEMPLATE.mk  # Processing targets
-│   └── ...                     # Other cookbook components
-└── build.d/                    # Local build directory (auto-created)
-```
 
-## Quick Start
+The canonical pipeline outputs are S3 objects. Files under `build.d/` are local
+stamps or transient artifacts used by Make.
 
-Follow these steps to get started with the template:
+## Requirements
 
-### 1. Prerequisites
+- Python 3.11.
+- GNU Make 4.0 or later. On macOS, Homebrew installs this as `gmake`.
+- S3 credentials in `.env`: `SE_ACCESS_KEY`, `SE_SECRET_KEY`, and `SE_HOST_URL`.
+- Python dependencies from `Pipfile`, including `impresso-cookbook`,
+  `impresso-pipelines[adclassifier]`, `smart-open`, and `openai`.
+- `DEEPSEEK_API_KEY` or `OPENAI_API_KEY` for keyword generation.
+- `data/providers-title.json`, unless `KEYPHRASE_PROVIDERS_TITLE_PATH` is
+  overridden.
 
-Ensure you have the required system dependencies installed:
+The Make addon uses `.venv/bin/python` when present, otherwise `python3`. Override
+`PYTHON_KEYPHRASE` to use another interpreter.
 
-**Ubuntu/Debian:**
+## Setup
+
+Create an environment file and add the S3 endpoint if it is not already present:
 
 ```bash
-sudo apt-get update
-sudo apt-get install -y make git git-lfs parallel coreutils python3 python3-pip
+cp dotenv.sample .env
 ```
 
-**macOS:**
+Minimum `.env` content:
 
 ```bash
-# Install Homebrew if not already installed
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-
-# Install dependencies
-brew install make git git-lfs parallel coreutils python3
-```
-
-**System Requirements:**
-
-- Python 3.11+
-- Make (GNU Make recommended)
-- Git with git-lfs
-- AWS CLI (optional, for direct S3 access)
-
-### 2. Clone and Setup
-
-1. **Clone the repository:**
-
-   ```bash
-   git clone --recursive <your-template-repo>
-   cd impresso-cookbook-template
-   ```
-
-2. **Configure environment:**
-
-   ```bash
-   cp dotenv.sample .env
-   # Edit .env with your S3 credentials (see Configuration section below)
-   ```
-
-3. **Install Python dependencies:**
-
-   ```bash
-   # Using pipenv (recommended)
-   pipenv install
-
-   # Or using pip directly
-   python3 -m pip install -r requirements.txt
-   ```
-
-4. **Initialize the environment:**
-   ```bash
-   make setup
-   ```
-
-### 3. Verify Installation
-
-Test your setup with a quick help command:
-
-```bash
-make help
-```
-
-You should see available targets and configuration options.
-
-## Configuration
-
-Before running any processing, configure your environment:
-
-### Required Environment Variables
-
-Edit your `.env` file with these required settings:
-
-```bash
-# S3 Configuration (required)
-SE_ACCESS_KEY=your_s3_access_key
-SE_SECRET_KEY=your_s3_secret_key
+SE_ACCESS_KEY=...
+SE_SECRET_KEY=...
 SE_HOST_URL=https://os.zhdk.cloud.switch.ch/
-
-# Logging Configuration (optional)
-LOGGING_LEVEL=INFO
+PIPENV_VENV_IN_PROJECT=enabled
 ```
 
-### Optional Processing Variables
-
-These can be set in `.env` as shell variables (propagate to make) or passed as command
-arguments to make:
-
-- `NEWSPAPER`: Target newspaper to process
-- `BUILD_DIR`: Local build directory (default: `build.d`)
-- `NEWSPAPER_YEAR_SORTING`: Processing order (`shuf` for random, `cat` for
-  chronological) of the years within a newspaper
-- `NPROC`: Number of CPU cores (auto-detected if not set)
-- `NEWSPAPER_JOBS`: Number of parallel jobs per newspaper processing (derived: NPROC ÷ COLLECTION_JOBS)
-- `COLLECTION_JOBS`: Number of newspapers to process in parallel within a collection (default: 2)
-- `MAX_LOAD`: Maximum system load (default: NPROC)
-
-### S3 Bucket Configuration
-
-Configure S3 buckets in your paths file:
-
-- `S3_BUCKET_REBUILT`: Input data bucket (default: `22-rebuilt-final`)
-- `S3_BUCKET_TEMPLATE`: Output data bucket (default: `140-processed-data-sandbox`)
-
-## Running the Template
-
-### Test the Template Processing
-
-Process a small newspaper to verify everything works:
+Install the Python dependencies:
 
 ```bash
-# Test with a smaller newspaper first
-make newspaper NEWSPAPER=actionfem
+pipenv install
 ```
 
-### Processing Options
-
-**Process a single newspaper (all years):**
+Then either run commands through `pipenv run` or activate the environment:
 
 ```bash
-make newspaper NEWSPAPER=actionfem
+pipenv shell
 ```
 
-**Step-by-step processing:**
+## Running
 
-1. **Sync data:**
+The examples below use `make`; use `gmake` instead if GNU Make is not installed
+as `make` on the local system.
 
-   ```bash
-   make sync NEWSPAPER=actionfem
-   ```
-
-2. **Run processing:**
-   ```bash
-   make processing-target NEWSPAPER=actionfem
-   ```
-
-**Process multiple newspapers:**
+Print the effective keyphrase configuration:
 
 ```bash
-make collection COLLECTION_JOBS=4
+make keyphrase-config
 ```
 
-### Available Commands
-
-Explore the build system:
+Run the full pipeline:
 
 ```bash
-# Show all available targets
-make help
-
-# Show current configuration
-make config
+DEEPSEEK_API_KEY=... make keyphrase-all
 ```
 
-## Adapting to Your Processing Pipeline
-
-Once you've verified the template works, adapt it to your specific processing needs:
-
-### 1. Choose Your Processing Acronym
-
-Decide on a short acronym for your new pipeline (e.g., `myimpressopipeline`):
+Run individual stages:
 
 ```bash
-export PROCESSING_ACRONYM=myimpressopipeline
-make -f cookbook/template-starter.mk
+make keyphrase-step-1-filter
+make keyphrase-step-2-sample
+make keyphrase-step-3-split
+make keyphrase-step-4-keywords
 ```
 
-This will create adapted files with your acronym:
-
-```
-├── README.md                   # This file
-├── Makefile.myimpressopipeline # Main build configuration adapted for myimpressopipeline
-├── .env                        # Environment variables (create manually from dotenv.sample)
-├── dotenv.sample               # Sample environment configuration
-├── Pipfile                     # Python dependencies
-├── lib/
-│   └── cli_myimpressopipeline.py         # Template CLI script adapted for myimpressopipeline
-├── cookbook/                   # Build system components
-│   ├── README.md               # Detailed cookbook documentation
-│   ├── setup_myimpressopipeline.mk       # myimpressopipeline-specific setup
-│   ├── paths_myimpressopipeline.mk       # Path definitions
-│   ├── sync_myimpressopipeline.mk        # Data synchronization
-│   ├── processing_myimpressopipeline.mk  # Processing targets
-│   └── ...                     # Other cookbook components
-└── build.d/                    # Local build directory (auto-created)
-```
-
-### 2. Customize Your Processing Logic
-
-After adaptation, customize these key files:
-
-- **`lib/cli_myimpressopipeline.py`**: Implement your processing logic
-- **`cookbook/processing_myimpressopipeline.mk`**: Define your processing targets
-- **`cookbook/paths_myimpressopipeline.mk`**: Configure input/output paths and S3 buckets
-
-### 3. Test Your Adapted Pipeline
+Sync existing S3 outputs into local Make stamps:
 
 ```bash
-# Use your new Makefile
-make -f Makefile.myimpressopipeline newspaper NEWSPAPER=actionfem
+make keyphrase-sync-output
 ```
 
-## Build System
+## Main Configuration
 
-### Core Targets
+The default input is the current language-identification aggregate:
 
-- `make help`: Show available targets and current configuration
-- `make setup`: Initialize environment (run once after installation)
-- `make newspaper`: Process single newspaper
-- `make collection`: Process multiple newspapers in parallel
-- `make all`: Complete processing pipeline with data sync
+```make
+KEYPHRASE_INPUT_S3=s3://115-canonical-processed-final/langident/langident-lid-ensemble_multilingual_v2-0-2__AGGREGATED.jsonl.gz
+```
 
-### Data Management
+The default output run prefix is:
 
-- `make sync`: Sync input and output data
-- `make sync-input`: Download input data from S3
-- `make sync-output`: Upload results to S3 (will never overwrite existing data)
-- `make clean-build`: Remove build directory
+```make
+S3_PATH_KEYPHRASE=s3://140-processed-data-sandbox/keyphrase/keyphrase-keywords-deepseek-chat_v1-0-0
+```
 
-### Parallel Processing
-
-The system automatically detects CPU cores and configures parallel processing:
+Common overrides:
 
 ```bash
-# Process collection with custom parallelization
-make collection COLLECTION_JOBS=4 MAX_LOAD=8
+make keyphrase-all \
+  KEYPHRASE_INPUT_S3=s3://bucket/path/input.jsonl.gz \
+  RUN_VERSION_KEYPHRASE=v1-0-1 \
+  KEYPHRASE_TARGET_NON_AD_PER_LANGUAGE=1000 \
+  KEYPHRASE_LANGUAGES="de en fr lb"
 ```
 
-### Build System Architecture
+Useful variables:
 
-The build system uses:
+- `S3_BUCKET_KEYPHRASE`: Output bucket, default `140-processed-data-sandbox`.
+- `RUN_VERSION_KEYPHRASE`: Version component in the output run ID.
+- `KEYPHRASE_FILTER_TP_OPTION`: Type filter, default `--tp article`.
+- `KEYPHRASE_FILTER_MIN_OCRQA_OPTION`: OCR-quality threshold, default
+  `--min-ocrqa 0.7`.
+- `KEYPHRASE_FILTER_MIN_LEN_OPTION`: Minimum text length, default `--min-len 550`.
+- `KEYPHRASE_COMPILER_S3_PREFIX`: Compiler source prefix for missing full text,
+  default `s3://122-rebuilt-final/`.
+- `KEYPHRASE_TARGET_NON_AD_PER_LANGUAGE`: Non-ad sample target per language,
+  default `1000`.
+- `KEYPHRASE_LANGUAGES`: Optional space-separated language whitelist.
+- `KEYPHRASE_DEEPSEEK_MODEL`: Chat model, default `deepseek-chat`.
+- `KEYPHRASE_DEEPSEEK_BASE_URL`: OpenAI-compatible API base URL, default
+  `https://api.deepseek.com`.
+- `KEYPHRASE_VALIDATE`: Set to `0` to skip JSON schema validation.
 
-- **Stamp Files**: Track processing state without downloading full datasets
-- **S3 Integration**: Direct processing from/to S3 storage
-- **Distributed Processing**: Multiple machines can work independently
-- **Dependency Management**: Automatic dependency resolution via Make
+## Outputs
 
-For detailed build system documentation, see [cookbook/README.md](cookbook/README.md).
+For the default run prefix, the pipeline writes:
 
-## Contributing
+```text
+s3://140-processed-data-sandbox/keyphrase/<RUN_ID>/
+  01-filter/filtered.jsonl.gz
+  02-classified/classified.jsonl.gz
+  02-classified/sample_non_ads.jsonl.gz
+  03-per-language/<language>.jsonl.gz
+  03-per-language/languages_summary.json
+  04-keywords/keywords_<language>.jsonl
+  04-keywords/deepseek_summary.json
+```
 
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Test with `make newspaper NEWSPAPER=actionfem`
-5. Submit a pull request
+Keyword records keep the original article fields and add a `keywords` array of
+English conceptual keyphrases. Per-language records include `ad_class: "non-ad"`
+for traceability.
+
+## Direct Script Use
+
+Make is the preferred interface for production runs, but the scripts in `lib/`
+can be run directly for debugging and small local/S3 experiments. See
+`lib/README.md` for the manual script order.
 
 ## About Impresso
 
-### Impresso Project
-
-[Impresso - Media Monitoring of the Past](https://impresso-project.ch) is an interdisciplinary research project that aims to develop and consolidate tools for processing and exploring large collections of media archives across modalities, time, languages and national borders.
+[Impresso - Media Monitoring of the Past](https://impresso-project.ch) is an
+interdisciplinary research project that aims to develop and consolidate tools for
+processing and exploring large collections of media archives across modalities,
+time, languages and national borders.
 
 The project is funded by:
 
-- Swiss National Science Foundation (grants [CRSII5_173719](http://p3.snf.ch/project-173719) and [CRSII5_213585](https://data.snf.ch/grants/grant/213585))
+- Swiss National Science Foundation (grants
+  [CRSII5_173719](http://p3.snf.ch/project-173719) and
+  [CRSII5_213585](https://data.snf.ch/grants/grant/213585))
 - Luxembourg National Research Fund (grant 17498891)
 
 ### Copyright
@@ -316,7 +211,9 @@ Copyright (C) 2024 The Impresso team.
 
 ### License
 
-This program is provided as open source under the [GNU Affero General Public License](https://github.com/impresso/impresso-pyindexation/blob/master/LICENSE) v3 or later.
+This program is provided as open source under the
+[GNU Affero General Public License](https://github.com/impresso/impresso-pyindexation/blob/master/LICENSE)
+v3 or later.
 
 ---
 

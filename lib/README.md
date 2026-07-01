@@ -13,3 +13,11 @@ Order of running files:
 
 0. `classify_ads_jsonl_s3.py`  
    Lightweight ad-classification export step. It reads local/S3 `.jsonl` or `.jsonl.bz2`, keeps only article records (`tp == "ar"`), applies the impresso ad-classifier on `ft` in batches, and writes a minimal output containing only `id` and `ad_classification`.
+
+Make targets mirror the main 1-4 flow:
+
+- `make keyphrase-step-1-filter`
+- `make keyphrase-step-2-sample`
+- `make keyphrase-step-3-split`
+- `make keyphrase-step-4-keywords`
+- `make keyphrase-all`

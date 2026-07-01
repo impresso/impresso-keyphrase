@@ -91,3 +91,4 @@ include cookbook/local_to_s3.mk
 
 
 # FURTHER ADDONS
+include cookbook-repo-addons/keyphrase.mk
