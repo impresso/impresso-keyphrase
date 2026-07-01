@@ -10,3 +10,6 @@ Order of running files:
 
 4. `generate_keywords_deepseek_s3.py`  
    Keyword-generation step. It reads per-language JSONL files from a local/S3 folder (plus `languages_summary.json`), calls the DeepSeek chat model with the notebook prompt structure, enriches each article with a `keywords` field, writes `keywords_<language>.jsonl` files, and emits a `deepseek_summary.json` with per-language token usage and totals.
+
+0. `classify_ads_jsonl_s3.py`  
+   Lightweight ad-classification export step. It reads local/S3 `.jsonl` or `.jsonl.bz2`, keeps only article records (`tp == "ar"`), applies the impresso ad-classifier on `ft` in batches, and writes a minimal output containing only `id` and `ad_classification`.

@@ -14,9 +14,13 @@ python-dotenv = "*"  # Load environment variables from .env files
 # HTTP and file handling
 requests = "*"  # HTTP library for making API requests
 smart-open = {extras = ["s3","http"], version = "==6.4"}  # Unified file I/O for local and cloud storage
+openai = "*"  # DeepSeek-compatible OpenAI client used for keyword generation
 
 # Cloud services
 boto3 = "==1.35.95"  # AWS SDK for Python
+
+# Impresso internal pipelines
+impresso-pipelines = {extras = ["adclassifier"], version = "*"}  # Ad classifier pipeline
 
 # Data validation
 check-jsonschema = "*"  # JSON schema validation
